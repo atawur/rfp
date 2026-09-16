@@ -1,0 +1,20 @@
+from app.db.base_class import Base  # noqa
+# Import all models here for Alembic
+from app.models.user import User  # noqa
+from app.models.role import Role  # noqa
+from app.models.permission import Permission  # noqa
+from app.models.website import Website  # noqa
+from app.models.crawl_run import CrawlRun  # noqa
+from app.models.rfp import RFP  # noqa
+from app.models.rfp_document import RFPDocument  # noqa
+from app.models.rfp_version import RFPVersion  # noqa
+from app.models.rfp_change import RFPChange  # noqa
+from app.models.notification_preference import NotificationPreference  # noqa
+from app.models.notification import Notification  # noqa
+from app.models.email_log import EmailLog  # noqa
+from app.models.audit_log import AuditLog  # noqa
+from app.models.ai_agent_config import AIAgentConfig  # noqa
+from app.models.content_fingerprint import ContentFingerprint  # noqa
+from app.models.llm_cache import LLMCache  # noqa
+from app.models.notification_receiver import NotificationReceiver  # noqa
+from app.models.website import website_notification_receivers  # noqa
