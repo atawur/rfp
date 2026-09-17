@@ -40,9 +40,11 @@ def test_global_crawl_creates_individual_crawl_runs_and_tracks_them():
 
     try:
         # Mock scheduler to avoid running actual network crawling in this test
+        # and mock get_active_websites to strictly isolate only the test websites
         mock_job = MagicMock()
         mock_job.id = "mock-job-id"
-        with patch("app.core.scheduler.scheduler.add_job", return_value=mock_job) as mock_add_job:
+        with patch("app.core.scheduler.scheduler.add_job", return_value=mock_job) as mock_add_job, \
+             patch.object(website_service, "get_active_websites", return_value=[website_1, website_2]):
             res = website_service.trigger_all_active_websites_crawl(db)
 
             # Check return structure
@@ -75,7 +77,8 @@ def test_global_crawl_creates_individual_crawl_runs_and_tracks_them():
             # Test duplicate protection: calling trigger_all_active_websites_crawl again
             # while runs are still active should not create duplicate runs
             mock_add_job.reset_mock()
-            res_second = website_service.trigger_all_active_websites_crawl(db)
+            with patch.object(website_service, "get_active_websites", return_value=[website_1, website_2]):
+                res_second = website_service.trigger_all_active_websites_crawl(db)
             assert website_1.id in res_second["website_ids"]
             assert website_2.id in res_second["website_ids"]
             # No new add_job calls should be made because they are already actively running

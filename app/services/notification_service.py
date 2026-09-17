@@ -60,12 +60,117 @@ def get_eligible_receivers_for_rfp(db: Session, rfp: RFP, all_active_receivers: 
     return [r for r in all_active_receivers if r.id in linked_receiver_ids]
 
 
+import threading
+from datetime import datetime, timezone, timedelta
+
+_dispatch_lock = threading.Lock()
+
+
+def has_active_crawls(db: Session) -> bool:
+    """
+    Checks whether any website crawl is currently actively executing.
+    """
+    from app.models.crawl_run import CrawlRun
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+    active_count = (
+        db.query(CrawlRun)
+        .filter(CrawlRun.status == "running", CrawlRun.created_at >= cutoff)
+        .count()
+    )
+    return active_count > 0
+
+
+def flush_pending_notifications(db: Session = None):
+    """
+    Flushes all PENDING notifications across all crawled websites.
+    Groups them by receiver_id, marks them QUEUED, and dispatches EXACTLY ONE
+    consolidated email per receiver, formatted website-by-website.
+    """
+    from app.db.session import SessionLocal
+    from app.workers.email_worker.tasks import send_batch_rfp_email
+
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+
+    try:
+        with _dispatch_lock:
+            pending_notifs = (
+                db.query(Notification)
+                .filter(Notification.status == "PENDING")
+                .all()
+            )
+            if not pending_notifs:
+                return
+
+            receiver_to_notifs: Dict[int, List[int]] = defaultdict(list)
+            for n in pending_notifs:
+                if n.receiver_id:
+                    receiver_to_notifs[n.receiver_id].append(n.id)
+                    n.status = "QUEUED"
+
+            db.commit()
+
+            for receiver_id, notif_ids in receiver_to_notifs.items():
+                if not notif_ids:
+                    continue
+                logger.info(
+                    f"Dispatching single consolidated email with {len(notif_ids)} RFP(s) for receiver_id {receiver_id}"
+                )
+                if (
+                    hasattr(app.core.scheduler, "scheduler")
+                    and app.core.scheduler.scheduler
+                    and app.core.scheduler.scheduler.running
+                ):
+                    app.core.scheduler.scheduler.add_job(
+                        send_batch_rfp_email,
+                        kwargs={"receiver_id": receiver_id, "notification_ids": notif_ids},
+                    )
+                else:
+                    threading.Thread(
+                        target=send_batch_rfp_email,
+                        kwargs={"receiver_id": receiver_id, "notification_ids": notif_ids},
+                        daemon=True,
+                    ).start()
+    finally:
+        if close_db:
+            db.close()
+
+
+def schedule_flush_fallback(delay_seconds: int = 45):
+    """
+    Schedules a fallback flush in APScheduler to ensure notifications are never held
+    indefinitely if any crawl runs unexpectedly long or gets interrupted.
+    """
+    run_date = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+    if (
+        hasattr(app.core.scheduler, "scheduler")
+        and app.core.scheduler.scheduler
+        and app.core.scheduler.scheduler.running
+    ):
+        try:
+            app.core.scheduler.scheduler.add_job(
+                flush_pending_notifications,
+                trigger="date",
+                run_date=run_date,
+                id="flush_pending_notifications_fallback",
+                replace_existing=True,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to schedule flush fallback: {e}")
+    else:
+        timer = threading.Timer(delay_seconds, flush_pending_notifications)
+        timer.daemon = True
+        timer.start()
+
+
 def evaluate_and_notify_users_batch(db: Session, rfps: List[RFP]) -> List[Notification]:
     """
     Notification Eligibility Engine:
     Given a list of newly discovered RFPs/RFQs, determines eligible active NotificationReceivers
     based on each RFP's source website notification settings.
-    For each receiver, queues a single consolidated email.
+    Creates PENDING notifications and schedules consolidated delivery.
     """
     if not rfps:
         return []
@@ -125,31 +230,18 @@ def evaluate_and_notify_users_batch(db: Session, rfps: List[RFP]) -> List[Notifi
                 db.refresh(notif)
             all_created_notifications.extend(receiver_notifications)
 
-            notif_ids = [n.id for n in receiver_notifications]
+    # Consolidation Dispatch:
+    # If other websites are currently crawling, wait for them to finish or fire via fallback.
+    # If no other crawls are actively running, flush immediately.
+    if all_created_notifications:
+        if has_active_crawls(db):
             logger.info(
-                f"Queueing consolidated email with {len(receiver_notifications)} new RFP(s) for receiver {receiver.email}"
+                f"Active crawls in progress; holding {len(all_created_notifications)} notification(s) for consolidation and scheduling fallback."
             )
-
-            # Queue a SINGLE email task containing all RFPs for this receiver
-            if (
-                hasattr(app.core.scheduler, "scheduler")
-                and app.core.scheduler.scheduler
-                and app.core.scheduler.scheduler.running
-            ):
-                app.core.scheduler.scheduler.add_job(
-                    send_batch_rfp_email,
-                    kwargs={"receiver_id": receiver.id, "notification_ids": notif_ids},
-                )
-            else:
-                logger.info(
-                    f"Scheduler not running; invoking send_batch_rfp_email directly in background for {receiver.email}"
-                )
-                import threading
-                threading.Thread(
-                    target=send_batch_rfp_email,
-                    kwargs={"receiver_id": receiver.id, "notification_ids": notif_ids},
-                    daemon=True,
-                ).start()
+            schedule_flush_fallback(delay_seconds=45)
+        else:
+            logger.info("No other active crawls in progress; flushing consolidated notifications immediately.")
+            flush_pending_notifications(db)
 
     return all_created_notifications
 

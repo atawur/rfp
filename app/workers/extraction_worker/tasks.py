@@ -61,6 +61,14 @@ def extract_rfp_from_url(
             }
             db.commit()
 
+        # Check if all active website crawls have finished; if so, dispatch consolidated email
+        try:
+            from app.services.notification_service import has_active_crawls, flush_pending_notifications
+            if not has_active_crawls(db):
+                flush_pending_notifications(db)
+        except Exception as flush_err:
+            logger.warning(f"Failed to flush pending notifications on crawl completion: {flush_err}")
+
         summary_msg = (
             f"Success: Processed {candidates_found} items for {url} "
             f"(inserted: {inserted_count}, updated: {updated_count}, ignored: {ignored_count})"
@@ -78,6 +86,14 @@ def extract_rfp_from_url(
                 db.commit()
             except Exception as db_err:
                 logger.error(f"Failed to record crawl failure status: {db_err}")
+
+        # In case of failure, also check if this was the last active crawl
+        try:
+            from app.services.notification_service import has_active_crawls, flush_pending_notifications
+            if not has_active_crawls(db):
+                flush_pending_notifications(db)
+        except Exception as flush_err:
+            logger.warning(f"Failed to flush pending notifications on crawl failure: {flush_err}")
 
         return f"Failed: {str(e)}"
     finally:

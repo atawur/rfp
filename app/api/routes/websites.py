@@ -37,6 +37,20 @@ def get_crawl_status(
 
     # Check for crawls marked running within the last 15 minutes
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+
+    # Auto-expire any stale runs older than 15 minutes
+    stale_runs = (
+        db.query(CrawlRun)
+        .filter(CrawlRun.status == "running", CrawlRun.created_at < cutoff)
+        .all()
+    )
+    if stale_runs:
+        for r in stale_runs:
+            r.status = "failed"
+            r.error = "Crawl run timed out"
+            r.completed_at = datetime.now(timezone.utc)
+        db.commit()
+
     running_runs = (
         db.query(CrawlRun)
         .filter(CrawlRun.status == "running", CrawlRun.created_at >= cutoff)
